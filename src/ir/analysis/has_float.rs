@@ -1,12 +1,12 @@
 //! Determining which types has float.
 
 use super::{generate_dependencies, ConstrainResult, MonotoneFramework};
-use ir::comp::Field;
-use ir::comp::FieldMethods;
-use ir::context::{BindgenContext, ItemId};
-use ir::traversal::EdgeKind;
-use ir::ty::TypeKind;
-use {HashMap, HashSet};
+use crate::ir::comp::Field;
+use crate::ir::comp::FieldMethods;
+use crate::ir::context::{BindgenContext, ItemId};
+use crate::ir::traversal::EdgeKind;
+use crate::ir::ty::TypeKind;
+use crate::{HashMap, HashSet};
 
 /// An analysis that finds for each IR item whether it has float or not.
 ///
@@ -94,7 +94,7 @@ impl<'ctx> MonotoneFramework for HasFloat<'ctx> {
     }
 
     fn initial_worklist(&self) -> Vec<ItemId> {
-        self.ctx.whitelisted_items().iter().cloned().collect()
+        self.ctx.allowlisted_items().iter().cloned().collect()
     }
 
     fn constrain(&mut self, id: ItemId) -> ConstrainResult {

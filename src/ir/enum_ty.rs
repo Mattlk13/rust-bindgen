@@ -3,12 +3,11 @@
 use super::super::codegen::EnumVariation;
 use super::context::{BindgenContext, TypeId};
 use super::item::Item;
-use super::ty::TypeKind;
-use clang;
-use ir::annotations::Annotations;
-use ir::item::ItemCanonicalPath;
-use parse::{ClangItemParser, ParseError};
-use regex_set::RegexSet;
+use super::ty::{Type, TypeKind};
+use crate::clang;
+use crate::ir::annotations::Annotations;
+use crate::parse::{ClangItemParser, ParseError};
+use crate::regex_set::RegexSet;
 
 /// An enum representing custom handling that can be given to a variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -69,15 +68,17 @@ impl Enum {
             .and_then(|et| Item::from_ty(&et, declaration, None, ctx).ok());
         let mut variants = vec![];
 
+        let variant_ty =
+            repr.and_then(|r| ctx.resolve_type(r).safe_canonical_type(ctx));
+        let is_bool = variant_ty.map_or(false, Type::is_bool);
+
         // Assume signedness since the default type by the C standard is an int.
-        let is_signed = repr
-            .and_then(|r| ctx.resolve_type(r).safe_canonical_type(ctx))
-            .map_or(true, |ty| match *ty.kind() {
-                TypeKind::Int(ref int_kind) => int_kind.is_signed(),
-                ref other => {
-                    panic!("Since when enums can be non-integers? {:?}", other)
-                }
-            });
+        let is_signed = variant_ty.map_or(true, |ty| match *ty.kind() {
+            TypeKind::Int(ref int_kind) => int_kind.is_signed(),
+            ref other => {
+                panic!("Since when enums can be non-integers? {:?}", other)
+            }
+        });
 
         let type_name = ty.spelling();
         let type_name = if type_name.is_empty() {
@@ -90,7 +91,9 @@ impl Enum {
         let definition = declaration.definition().unwrap_or(declaration);
         definition.visit(|cursor| {
             if cursor.kind() == CXCursor_EnumConstantDecl {
-                let value = if is_signed {
+                let value = if is_bool {
+                    cursor.enum_val_boolean().map(EnumVariantValue::Boolean)
+                } else if is_signed {
                     cursor.enum_val_signed().map(EnumVariantValue::Signed)
                 } else {
                     cursor.enum_val_unsigned().map(EnumVariantValue::Unsigned)
@@ -115,7 +118,7 @@ impl Enum {
                             }
                         });
 
-                    let name = ctx
+                    let new_name = ctx
                         .parse_callbacks()
                         .and_then(|callbacks| {
                             callbacks.enum_variant_name(type_name, &name, val)
@@ -127,10 +130,11 @@ impl Enum {
                                 .last()
                                 .cloned()
                         })
-                        .unwrap_or(name);
+                        .unwrap_or_else(|| name.clone());
 
                     let comment = cursor.raw_comment();
                     variants.push(EnumVariant::new(
+                        new_name,
                         name,
                         comment,
                         val,
@@ -149,7 +153,7 @@ impl Enum {
         enums: &RegexSet,
         item: &Item,
     ) -> bool {
-        let path = item.canonical_path(ctx);
+        let path = item.path_for_allowlisting(ctx);
         let enum_ty = item.expect_type();
 
         if enums.matches(&path[1..].join("::")) {
@@ -183,7 +187,10 @@ impl Enum {
             &ctx.options().bitfield_enums,
             item,
         ) {
-            EnumVariation::Bitfield
+            EnumVariation::NewType { is_bitfield: true }
+        } else if self.is_matching_enum(ctx, &ctx.options().newtype_enums, item)
+        {
+            EnumVariation::NewType { is_bitfield: false }
         } else if self.is_matching_enum(
             ctx,
             &ctx.options().rustified_enums,
@@ -218,6 +225,9 @@ pub struct EnumVariant {
     /// The name of the variant.
     name: String,
 
+    /// The original name of the variant (without user mangling)
+    name_for_allowlisting: String,
+
     /// An optional doc comment.
     comment: Option<String>,
 
@@ -231,6 +241,9 @@ pub struct EnumVariant {
 /// A constant value assigned to an enumeration variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EnumVariantValue {
+    /// A boolean constant.
+    Boolean(bool),
+
     /// A signed constant.
     Signed(i64),
 
@@ -242,12 +255,14 @@ impl EnumVariant {
     /// Construct a new enumeration variant from the given parts.
     pub fn new(
         name: String,
+        name_for_allowlisting: String,
         comment: Option<String>,
         val: EnumVariantValue,
         custom_behavior: Option<EnumVariantCustomBehavior>,
     ) -> Self {
         EnumVariant {
             name,
+            name_for_allowlisting,
             comment,
             val,
             custom_behavior,
@@ -257,6 +272,11 @@ impl EnumVariant {
     /// Get this variant's name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Get this variant's name.
+    pub fn name_for_allowlisting(&self) -> &str {
+        &self.name_for_allowlisting
     }
 
     /// Get this variant's value.

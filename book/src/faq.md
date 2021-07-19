@@ -3,14 +3,14 @@
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
-
-- [Why isn't `bindgen` generating methods for this whitelisted class?](#why-isnt-bindgen-generating-methods-for-this-whitelisted-class)
+- [Why isn't `bindgen` generating methods for this allowlisted class?](#why-isnt-bindgen-generating-methods-for-this-allowlisted-class)
 - [Why isn't `bindgen` generating bindings to inline functions?](#why-isnt-bindgen-generating-bindings-to-inline-functions)
 - [Does `bindgen` support the C++ Standard Template Library (STL)?](#does-bindgen-support-the-c-standard-template-library-stl)
+- [How to deal with bindgen generated padding fields?](#how-to-deal-with-bindgen-generated-padding-fields)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
-### Why isn't `bindgen` generating methods for this whitelisted class?
+### Why isn't `bindgen` generating methods for this allowlisted class?
 
 Are the methods `inline` methods, or defined inline in the class? For example:
 
@@ -62,5 +62,36 @@ STL. That ties our hands when it comes to linking: ["Why isn't `bindgen` generat
 As far as generating opaque blobs of bytes with the correct size and alignment,
 `bindgen` can do pretty well. This is typically enough to let you use types that
 transitively contain STL things. We generally recommend marking `std::.*` as
-opaque, and then whitelisting only the specific things you need from the library
+opaque, and then allowlisting only the specific things you need from the library
 you're binding to that is pulling in STL headers.
+
+### How to deal with bindgen generated padding fields?
+
+Depending the architecture, toolchain versions and source struct, it is
+possible that bindgen will generate padding fields named `__bindgen_padding_N`. 
+As these fields might be present when compiling for one architecture but not
+for an other, you should not initialize these fields manually when initializing
+the struct. Instead, use the `Default` trait. You can either enable this when
+constructing the `Builder` using the `derive_default` method, or you can
+implement this per struct using:
+
+```rust,ignore
+impl Default for SRC_DATA {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+```
+
+This makes it possible to initialize `SRC_DATA` by:
+
+```rust,ignore
+SRC_DATA {
+    field_a: "foo",
+    field_b: "bar",
+    ..Default::default()
+}
+```
+
+In the case bindgen generates a padding field, then this field will
+be automatically initialized by `..Default::default()`.

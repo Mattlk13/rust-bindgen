@@ -1,6 +1,6 @@
 # Generating Bindings to C++
 
-`bindgen` can handle a some C++ features, but not all of them. To set
+`bindgen` can handle some C++ features, but not all of them. To set
 expectations: `bindgen` will give you the type definitions and FFI declarations
 you need to build an API to the C++ library, but using those types in Rust will
 be nowhere near as nice as using them in C++. You will have to manually call
@@ -11,11 +11,11 @@ it ends in `.hpp`. If it doesn't, adding `-x c++` clang args can be used to
 force C++ mode. You probably also want to use `-std=c++14` or similar clang args
 as well.
 
-You pretty much **must** use [whitelisting](./whitelisting.md) when working
-with C++ to avoid pulling in all of the `std::*` types, many of which `bindgen`
+You pretty much **must** use [allowlisting](./allowlisting.md) when working
+with C++ to avoid pulling in all of the `std::.*` types, many of which `bindgen`
 cannot handle. Additionally, you may want to mark other types as
 [opaque](./opaque.md) that `bindgen` stumbles on. It is recommended to mark
-all of `std::*` opaque, and to whitelist only precisely the functions and types
+all of `std::.*` opaque, and to allowlist only precisely the functions and types
 you intend to use.
 
 You should read up on the [FAQs](./faq.md) as well.
@@ -59,7 +59,7 @@ cannot translate into Rust:
 * Anything related to template specialization:
   * Partial template specialization
   * Traits templates
-  * Specialization Failure Is Not An Error (SFINAE)
+  * Substitution Failure Is Not An Error (SFINAE)
 
 * Cross language inheritance, for example inheriting from a Rust struct in C++.
 

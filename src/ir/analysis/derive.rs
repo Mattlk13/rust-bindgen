@@ -3,20 +3,20 @@
 use std::fmt;
 
 use super::{generate_dependencies, ConstrainResult, MonotoneFramework};
-use ir::analysis::has_vtable::HasVtable;
-use ir::comp::CompKind;
-use ir::context::{BindgenContext, ItemId};
-use ir::derive::CanDerive;
-use ir::function::FunctionSig;
-use ir::item::{IsOpaque, Item};
-use ir::template::TemplateParameters;
-use ir::traversal::{EdgeKind, Trace};
-use ir::ty::RUST_DERIVE_IN_ARRAY_LIMIT;
-use ir::ty::{Type, TypeKind};
-use {Entry, HashMap, HashSet};
+use crate::ir::analysis::has_vtable::HasVtable;
+use crate::ir::comp::CompKind;
+use crate::ir::context::{BindgenContext, ItemId};
+use crate::ir::derive::CanDerive;
+use crate::ir::function::FunctionSig;
+use crate::ir::item::{IsOpaque, Item};
+use crate::ir::template::TemplateParameters;
+use crate::ir::traversal::{EdgeKind, Trace};
+use crate::ir::ty::RUST_DERIVE_IN_ARRAY_LIMIT;
+use crate::ir::ty::{Type, TypeKind};
+use crate::{Entry, HashMap, HashSet};
 
 /// Which trait to consider when doing the `CannotDerive` analysis.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum DeriveTrait {
     /// The `Copy` trait.
     Copy,
@@ -138,12 +138,25 @@ impl<'ctx> CannotDerive<'ctx> {
     }
 
     fn constrain_type(&mut self, item: &Item, ty: &Type) -> CanDerive {
-        if !self.ctx.whitelisted_items().contains(&item.id()) {
-            trace!(
-                "    cannot derive {} for blacklisted type",
-                self.derive_trait
-            );
-            return CanDerive::No;
+        if !self.ctx.allowlisted_items().contains(&item.id()) {
+            let can_derive = self
+                .ctx
+                .blocklisted_type_implements_trait(item, self.derive_trait);
+            match can_derive {
+                CanDerive::Yes => trace!(
+                    "    blocklisted type explicitly implements {}",
+                    self.derive_trait
+                ),
+                CanDerive::Manually => trace!(
+                    "    blocklisted type requires manual implementation of {}",
+                    self.derive_trait
+                ),
+                CanDerive::No => trace!(
+                    "    cannot derive {} for blocklisted type",
+                    self.derive_trait
+                ),
+            }
+            return can_derive;
         }
 
         if self.derive_trait.not_by_name(self.ctx, &item) {
@@ -240,25 +253,24 @@ impl<'ctx> CannotDerive<'ctx> {
                         self.derive_trait
                     );
                     return CanDerive::No;
-                } else {
-                    if self.derive_trait.can_derive_large_array() {
-                        trace!("    array can derive {}", self.derive_trait);
-                        return CanDerive::Yes;
-                    } else {
-                        if len <= RUST_DERIVE_IN_ARRAY_LIMIT {
-                            trace!(
-                                "    array is small enough to derive {}",
-                                self.derive_trait
-                            );
-                            return CanDerive::Yes;
-                        } else {
-                            trace!(
-                                "    array is too large to derive {}, but it may be implemented", self.derive_trait
-                            );
-                            return CanDerive::Manually;
-                        }
-                    }
                 }
+
+                if self.derive_trait.can_derive_large_array(&self.ctx) {
+                    trace!("    array can derive {}", self.derive_trait);
+                    return CanDerive::Yes;
+                }
+
+                if len > RUST_DERIVE_IN_ARRAY_LIMIT {
+                    trace!(
+                        "    array is too large to derive {}, but it may be implemented", self.derive_trait
+                    );
+                    return CanDerive::Manually;
+                }
+                trace!(
+                    "    array is small enough to derive {}",
+                    self.derive_trait
+                );
+                return CanDerive::Yes;
             }
             TypeKind::Vector(t, len) => {
                 let inner_type =
@@ -362,6 +374,20 @@ impl<'ctx> CannotDerive<'ctx> {
                     return CanDerive::No;
                 }
 
+                // Bitfield units are always represented as arrays of u8, but
+                // they're not traced as arrays, so we need to check here
+                // instead.
+                if !self.derive_trait.can_derive_large_array(&self.ctx) &&
+                    info.has_too_large_bitfield_unit() &&
+                    !item.is_opaque(self.ctx, &())
+                {
+                    trace!(
+                        "    cannot derive {} for comp with too large bitfield unit",
+                        self.derive_trait
+                    );
+                    return CanDerive::No;
+                }
+
                 let pred = self.derive_trait.consider_edge_comp();
                 return self.constrain_join(item, pred);
             }
@@ -432,11 +458,12 @@ impl DeriveTrait {
     fn not_by_name(&self, ctx: &BindgenContext, item: &Item) -> bool {
         match self {
             DeriveTrait::Copy => ctx.no_copy_by_name(item),
+            DeriveTrait::Debug => ctx.no_debug_by_name(item),
+            DeriveTrait::Default => ctx.no_default_by_name(item),
             DeriveTrait::Hash => ctx.no_hash_by_name(item),
             DeriveTrait::PartialEqOrPartialOrd => {
                 ctx.no_partialeq_by_name(item)
             }
-            _ => false,
         }
     }
 
@@ -469,10 +496,17 @@ impl DeriveTrait {
         }
     }
 
-    fn can_derive_large_array(&self) -> bool {
-        match self {
-            DeriveTrait::Copy => true,
-            _ => false,
+    fn can_derive_large_array(&self, ctx: &BindgenContext) -> bool {
+        if ctx.options().rust_features().larger_arrays {
+            match self {
+                DeriveTrait::Default => false,
+                _ => true,
+            }
+        } else {
+            match self {
+                DeriveTrait::Copy => true,
+                _ => false,
+            }
         }
     }
 
@@ -626,10 +660,10 @@ impl<'ctx> MonotoneFramework for CannotDerive<'ctx> {
     }
 
     fn initial_worklist(&self) -> Vec<ItemId> {
-        // The transitive closure of all whitelisted items, including explicitly
-        // blacklisted items.
+        // The transitive closure of all allowlisted items, including explicitly
+        // blocklisted items.
         self.ctx
-            .whitelisted_items()
+            .allowlisted_items()
             .iter()
             .cloned()
             .flat_map(|i| {
@@ -659,7 +693,7 @@ impl<'ctx> MonotoneFramework for CannotDerive<'ctx> {
             Some(ty) => {
                 let mut can_derive = self.constrain_type(item, ty);
                 if let CanDerive::Yes = can_derive {
-                    if !self.derive_trait.can_derive_large_array() &&
+                    if !self.derive_trait.can_derive_large_array(&self.ctx) &&
                         ty.layout(self.ctx).map_or(false, |l| {
                             l.align > RUST_DERIVE_IN_ARRAY_LIMIT
                         })

@@ -53,12 +53,12 @@ pub use self::has_float::HasFloat;
 mod sizedness;
 pub use self::sizedness::{Sizedness, SizednessAnalysis, SizednessResult};
 
-use ir::context::{BindgenContext, ItemId};
+use crate::ir::context::{BindgenContext, ItemId};
 
-use ir::traversal::{EdgeKind, Trace};
+use crate::ir::traversal::{EdgeKind, Trace};
+use crate::HashMap;
 use std::fmt;
 use std::ops;
-use HashMap;
 
 /// An analysis in the monotone framework.
 ///
@@ -183,7 +183,7 @@ where
 {
     let mut dependencies = HashMap::default();
 
-    for &item in ctx.whitelisted_items() {
+    for &item in ctx.allowlisted_items() {
         dependencies.entry(item).or_insert(vec![]);
 
         {
@@ -192,7 +192,7 @@ where
             item.trace(
                 ctx,
                 &mut |sub_item: ItemId, edge_kind| {
-                    if ctx.whitelisted_items().contains(&sub_item) &&
+                    if ctx.allowlisted_items().contains(&sub_item) &&
                         consider_edge(edge_kind)
                     {
                         dependencies
@@ -211,7 +211,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use {HashMap, HashSet};
+    use crate::{HashMap, HashSet};
 
     // Here we find the set of nodes that are reachable from any given
     // node. This is a lattice mapping nodes to subsets of all nodes. Our join

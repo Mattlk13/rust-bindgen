@@ -1,7 +1,7 @@
-use ir::comp::{BitfieldUnit, CompKind, Field, FieldData, FieldMethods};
-use ir::context::BindgenContext;
-use ir::item::{HasTypeParamInArray, IsOpaque, Item, ItemCanonicalName};
-use ir::ty::{TypeKind, RUST_DERIVE_IN_ARRAY_LIMIT};
+use crate::ir::comp::{BitfieldUnit, CompKind, Field, FieldData, FieldMethods};
+use crate::ir::context::BindgenContext;
+use crate::ir::item::{HasTypeParamInArray, IsOpaque, Item, ItemCanonicalName};
+use crate::ir::ty::{TypeKind, RUST_DERIVE_IN_ARRAY_LIMIT};
 use proc_macro2;
 
 pub fn gen_debug_impl(
@@ -120,9 +120,9 @@ impl<'a> ImplDebug<'a> for Item {
     ) -> Option<(String, Vec<proc_macro2::TokenStream>)> {
         let name_ident = ctx.rust_ident(name);
 
-        // We don't know if blacklisted items `impl Debug` or not, so we can't
+        // We don't know if blocklisted items `impl Debug` or not, so we can't
         // add them to the format string we're building up.
-        if !ctx.whitelisted_items().contains(&self.id()) {
+        if !ctx.allowlisted_items().contains(&self.id()) {
             return None;
         }
 
@@ -181,7 +181,9 @@ impl<'a> ImplDebug<'a> for Item {
                         format!("{}: Array with length {}", name, len),
                         vec![],
                     ))
-                } else if len < RUST_DERIVE_IN_ARRAY_LIMIT {
+                } else if len < RUST_DERIVE_IN_ARRAY_LIMIT ||
+                    ctx.options().rust_features().larger_arrays
+                {
                     // The simple case
                     debug_print(name, quote! { #name_ident })
                 } else {

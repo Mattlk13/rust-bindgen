@@ -13,8 +13,8 @@ use super::template::{
     AsTemplateParam, TemplateInstantiation, TemplateParameters,
 };
 use super::traversal::{EdgeKind, Trace, Tracer};
-use clang::{self, Cursor};
-use parse::{ClangItemParser, ParseError, ParseResult};
+use crate::clang::{self, Cursor};
+use crate::parse::{ClangItemParser, ParseError, ParseResult};
 use std::borrow::Cow;
 use std::io;
 
@@ -39,7 +39,6 @@ pub struct Type {
 /// traits, and so if we have a type containing an array with more than this
 /// many items, we won't be able to derive common traits on that type.
 ///
-/// We need type-level integers yesterday :'(
 pub const RUST_DERIVE_IN_ARRAY_LIMIT: usize = 32;
 
 impl Type {
@@ -973,7 +972,7 @@ impl Type {
                                 let inner_type = match inner {
                                     Ok(inner) => inner,
                                     Err(..) => {
-                                        error!(
+                                        warn!(
                                             "Failed to parse template alias \
                                              {:?}",
                                             location
@@ -1196,7 +1195,7 @@ impl Type {
                     return Err(ParseError::Continue);
                 }
                 _ => {
-                    error!(
+                    warn!(
                         "unsupported type: kind = {:?}; ty = {:?}; at {:?}",
                         ty.kind(),
                         ty,
@@ -1209,7 +1208,10 @@ impl Type {
 
         let name = if name.is_empty() { None } else { Some(name) };
 
-        let is_const = ty.is_const();
+        let is_const = ty.is_const() ||
+            (ty.kind() == CXType_ConstantArray &&
+                ty.elem_type()
+                    .map_or(false, |element| element.is_const()));
 
         let ty = Type::new(name, layout, kind, is_const);
         // TODO: maybe declaration.canonical()?

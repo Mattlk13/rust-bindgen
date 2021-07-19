@@ -10,6 +10,10 @@ int f32;
 int f64;
 int usize;
 int isize;
+int bool;
+int str;
+int dyn;
+
 int as;
 int box;
 int crate;

@@ -2,7 +2,8 @@
 
 Hi! We'd love to have your contributions! If you want help or mentorship, reach
 out to us in a GitHub issue, or stop by
-[#servo on irc.mozilla.org](irc://irc.mozilla.org#servo) and introduce yourself.
+[#rust on chat.mozilla.org](https://chat.mozilla.org/#/room/#rust:mozilla.org)
+and introduce yourself.
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
@@ -122,8 +123,18 @@ You may set the `BINDGEN_OVERWRITE_EXPECTED` environment variable to overwrite
 the expected bindings with `bindgen`'s current output:
 
 ```
-$BINDGEN_OVERWRITE_EXPECTED=1 cargo test
+$ BINDGEN_OVERWRITE_EXPECTED=1 cargo test
 ```
+
+If you set the BINDGEN_TESTS_DIFFTOOL environment variable, `cargo test` will
+execute $BINDGEN_TESTS_DIFFTOOL /path/of/expected/output /path/of/actual/output
+when the expected output differs from the actual output. You can use this to
+hand check differences by setting it to e.g. "meld" (assuming you have meld
+installed).
+
+If you're not changing command line arguments, you may want to set
+`BINDGEN_DISABLE_ROUNDTRIP_TEST` to avoid a lot of tests for round-tripping of
+those.
 
 ### Testing Generated Bindings
 

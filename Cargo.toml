@@ -14,7 +14,8 @@ readme = "README.md"
 repository = "https://github.com/rust-lang/rust-bindgen"
 documentation = "https://docs.rs/bindgen"
 homepage = "https://rust-lang.github.io/rust-bindgen/"
-version = "0.51.1"
+version = "0.58.1"
+edition = "2018"
 build = "build.rs"
 
 include = [
@@ -41,30 +42,28 @@ required-features = ["clap"]
 [dev-dependencies]
 diff = "0.1"
 clap = "2"
-shlex = "0.1"
+shlex = "1"
+tempfile = "3"
 
 [dependencies]
 bitflags = "1.0.3"
-cexpr = "0.3.3"
-cfg-if = "0.1.0"
+cexpr = "0.5"
 # This kinda sucks: https://github.com/rust-lang/cargo/issues/1982
 clap = { version = "2", optional = true }
-clang-sys = { version = "0.28.0", features = ["clang_6_0"] }
+clang-sys = { version = "1", features = ["clang_6_0"] }
 lazycell = "1"
 lazy_static = "1"
 peeking_take_while = "0.1.2"
 quote = { version = "1", default-features = false }
-regex = "1.0"
+regex = { version = "1.0", default-features = false , features = [ "std", "unicode"]}
 which = { version = "3.0", optional = true, default-features = false }
-shlex = "0.1"
+shlex = "1"
 rustc-hash = "1.0.1"
-# New validation in 0.3.6 breaks bindgen-integration:
-# https://github.com/alexcrichton/proc-macro2/commit/489c642.
 proc-macro2 = { version = "1", default-features = false }
 
 [dependencies.env_logger]
 optional = true
-version = "0.7"
+version = "0.8"
 
 [dependencies.log]
 optional = true
@@ -86,4 +85,3 @@ testing_only_libclang_9 = []
 testing_only_libclang_5 = []
 testing_only_libclang_4 = []
 testing_only_libclang_3_9 = []
-testing_only_libclang_3_8 = []

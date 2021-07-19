@@ -1,11 +1,11 @@
 //! Determining which types have destructors
 
 use super::{generate_dependencies, ConstrainResult, MonotoneFramework};
-use ir::comp::{CompKind, Field, FieldMethods};
-use ir::context::{BindgenContext, ItemId};
-use ir::traversal::EdgeKind;
-use ir::ty::TypeKind;
-use {HashMap, HashSet};
+use crate::ir::comp::{CompKind, Field, FieldMethods};
+use crate::ir::context::{BindgenContext, ItemId};
+use crate::ir::traversal::EdgeKind;
+use crate::ir::ty::TypeKind;
+use crate::{HashMap, HashSet};
 
 /// An analysis that finds for each IR item whether it has a destructor or not
 ///
@@ -83,7 +83,7 @@ impl<'ctx> MonotoneFramework for HasDestructorAnalysis<'ctx> {
     }
 
     fn initial_worklist(&self) -> Vec<ItemId> {
-        self.ctx.whitelisted_items().iter().cloned().collect()
+        self.ctx.allowlisted_items().iter().cloned().collect()
     }
 
     fn constrain(&mut self, id: ItemId) -> ConstrainResult {

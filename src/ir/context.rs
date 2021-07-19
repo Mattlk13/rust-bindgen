@@ -19,19 +19,19 @@ use super::module::{Module, ModuleKind};
 use super::template::{TemplateInstantiation, TemplateParameters};
 use super::traversal::{self, Edge, ItemTraversal};
 use super::ty::{FloatKind, Type, TypeKind};
-use callbacks::ParseCallbacks;
+use crate::callbacks::ParseCallbacks;
+use crate::clang::{self, Cursor};
+use crate::parse::ClangItemParser;
+use crate::BindgenOptions;
+use crate::{Entry, HashMap, HashSet};
 use cexpr;
-use clang::{self, Cursor};
 use clang_sys;
-use parse::ClangItemParser;
 use proc_macro2::{Ident, Span};
 use std::borrow::Cow;
-use std::cell::Cell;
-use std::collections::HashMap as StdHashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeSet, HashMap as StdHashMap};
 use std::iter::IntoIterator;
 use std::mem;
-use BindgenOptions;
-use {Entry, HashMap, HashSet};
 
 /// An identifier for some kind of IR item.
 #[derive(Debug, Copy, Clone, Eq, PartialOrd, Ord, Hash)]
@@ -354,6 +354,9 @@ pub struct BindgenContext {
     /// This needs to be an std::HashMap because the cexpr API requires it.
     parsed_macros: StdHashMap<Vec<u8>, cexpr::expr::EvalResult>,
 
+    /// A set of all the included filenames.
+    deps: BTreeSet<String>,
+
     /// The active replacements collected from replaces="xxx" annotations.
     replacements: HashMap<Vec<String>, ItemId>,
 
@@ -376,14 +379,18 @@ pub struct BindgenContext {
     /// Whether a bindgen complex was generated
     generated_bindgen_complex: Cell<bool>,
 
-    /// The set of `ItemId`s that are whitelisted. This the very first thing
+    /// The set of `ItemId`s that are allowlisted. This the very first thing
     /// computed after parsing our IR, and before running any of our analyses.
-    whitelisted: Option<ItemSet>,
+    allowlisted: Option<ItemSet>,
 
-    /// The set of `ItemId`s that are whitelisted for code generation _and_ that
+    /// Cache for calls to `ParseCallbacks::blocklisted_type_implements_trait`
+    blocklisted_types_implement_traits:
+        RefCell<HashMap<DeriveTrait, HashMap<ItemId, CanDerive>>>,
+
+    /// The set of `ItemId`s that are allowlisted for code generation _and_ that
     /// we should generate accounting for the codegen options.
     ///
-    /// It's computed right after computing the whitelisted items.
+    /// It's computed right after computing the allowlisted items.
     codegen_items: Option<ItemSet>,
 
     /// Map from an item's id to the set of template parameter items that it
@@ -463,8 +470,8 @@ pub struct BindgenContext {
     has_float: Option<HashSet<ItemId>>,
 }
 
-/// A traversal of whitelisted items.
-struct WhitelistedItemsTraversal<'ctx> {
+/// A traversal of allowlisted items.
+struct AllowlistedItemsTraversal<'ctx> {
     ctx: &'ctx BindgenContext,
     traversal: ItemTraversal<
         'ctx,
@@ -474,14 +481,14 @@ struct WhitelistedItemsTraversal<'ctx> {
     >,
 }
 
-impl<'ctx> Iterator for WhitelistedItemsTraversal<'ctx> {
+impl<'ctx> Iterator for AllowlistedItemsTraversal<'ctx> {
     type Item = ItemId;
 
     fn next(&mut self) -> Option<ItemId> {
         loop {
             let id = self.traversal.next()?;
 
-            if self.ctx.resolve_item(id).is_blacklisted(self.ctx) {
+            if self.ctx.resolve_item(id).is_blocklisted(self.ctx) {
                 continue;
             }
 
@@ -490,8 +497,8 @@ impl<'ctx> Iterator for WhitelistedItemsTraversal<'ctx> {
     }
 }
 
-impl<'ctx> WhitelistedItemsTraversal<'ctx> {
-    /// Construct a new whitelisted items traversal.
+impl<'ctx> AllowlistedItemsTraversal<'ctx> {
+    /// Construct a new allowlisted items traversal.
     pub fn new<R>(
         ctx: &'ctx BindgenContext,
         roots: R,
@@ -500,42 +507,11 @@ impl<'ctx> WhitelistedItemsTraversal<'ctx> {
     where
         R: IntoIterator<Item = ItemId>,
     {
-        WhitelistedItemsTraversal {
+        AllowlistedItemsTraversal {
             ctx,
             traversal: ItemTraversal::new(ctx, roots, predicate),
         }
     }
-}
-
-const HOST_TARGET: &'static str =
-    include_str!(concat!(env!("OUT_DIR"), "/host-target.txt"));
-
-/// Returns the effective target, and whether it was explicitly specified on the
-/// clang flags.
-fn find_effective_target(clang_args: &[String]) -> (String, bool) {
-    use std::env;
-
-    let mut args = clang_args.iter();
-    while let Some(opt) = args.next() {
-        if opt.starts_with("--target=") {
-            let mut split = opt.split('=');
-            split.next();
-            return (split.next().unwrap().to_owned(), true);
-        }
-
-        if opt == "-target" {
-            if let Some(target) = args.next() {
-                return (target.clone(), true);
-            }
-        }
-    }
-
-    // If we're running from a build script, try to find the cargo target.
-    if let Ok(t) = env::var("TARGET") {
-        return (t, false);
-    }
-
-    (HOST_TARGET.to_owned(), false)
 }
 
 impl BindgenContext {
@@ -544,9 +520,6 @@ impl BindgenContext {
         // TODO(emilio): Use the CXTargetInfo here when available.
         //
         // see: https://reviews.llvm.org/D32389
-        let (effective_target, explicit_target) =
-            find_effective_target(&options.clang_args);
-
         let index = clang::Index::new(false, true);
 
         let parse_options =
@@ -555,19 +528,11 @@ impl BindgenContext {
         let translation_unit = {
             let _t =
                 Timer::new("translation_unit").with_output(options.time_phases);
-            let clang_args = if explicit_target {
-                Cow::Borrowed(&options.clang_args)
-            } else {
-                let mut args = Vec::with_capacity(options.clang_args.len() + 1);
-                args.push(format!("--target={}", effective_target));
-                args.extend_from_slice(&options.clang_args);
-                Cow::Owned(args)
-            };
 
             clang::TranslationUnit::parse(
                 &index,
                 "",
-                &clang_args,
+                &options.clang_args,
                 &options.input_unsaved_files,
                 parse_options,
             ).expect("libclang error; possible causes include:
@@ -575,31 +540,24 @@ impl BindgenContext {
 - Unrecognized flags
 - Invalid flag arguments
 - File I/O errors
+- Host vs. target architecture mismatch
 If you encounter an error missing from this list, please file an issue or a PR!")
         };
 
         let target_info = clang::TargetInfo::new(&translation_unit);
-
-        #[cfg(debug_assertions)]
-        {
-            if let Some(ref ti) = target_info {
-                if effective_target == HOST_TARGET {
-                    assert_eq!(
-                        ti.pointer_width / 8,
-                        mem::size_of::<*mut ()>(),
-                        "{:?} {:?}",
-                        effective_target,
-                        HOST_TARGET
-                    );
-                }
-            }
-        }
-
         let root_module = Self::build_root_module(ItemId(0));
         let root_module_id = root_module.id().as_module_id_unchecked();
 
+        // depfiles need to include the explicitly listed headers too
+        let mut deps = BTreeSet::default();
+        if let Some(filename) = &options.input_header {
+            deps.insert(filename.clone());
+        }
+        deps.extend(options.extra_input_headers.iter().cloned());
+
         BindgenContext {
             items: vec![Some(root_module)],
+            deps,
             types: Default::default(),
             type_params: Default::default(),
             modules: Default::default(),
@@ -616,7 +574,8 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             target_info,
             options,
             generated_bindgen_complex: Cell::new(false),
-            whitelisted: None,
+            allowlisted: None,
+            blocklisted_types_implement_traits: Default::default(),
             codegen_items: None,
             used_template_parameters: None,
             need_bitfield_allocation: Default::default(),
@@ -631,6 +590,14 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             have_destructor: None,
             has_type_param_in_array: None,
             has_float: None,
+        }
+    }
+
+    /// Returns `true` if the target architecture is wasm32
+    pub fn is_target_wasm32(&self) -> bool {
+        match self.target_info {
+            Some(ref ti) => ti.triple.starts_with("wasm32-"),
+            None => false,
         }
     }
 
@@ -674,6 +641,19 @@ If you encounter an error missing from this list, please file an issue or a PR!"
     /// Get the user-provided callbacks by reference, if any.
     pub fn parse_callbacks(&self) -> Option<&dyn ParseCallbacks> {
         self.options().parse_callbacks.as_ref().map(|t| &**t)
+    }
+
+    /// Add another path to the set of included files.
+    pub fn include_file(&mut self, filename: String) {
+        if let Some(cbs) = self.parse_callbacks() {
+            cbs.include_file(&filename);
+        }
+        self.deps.insert(filename);
+    }
+
+    /// Get any included files.
+    pub fn deps(&self) -> &BTreeSet<String> {
+        &self.deps
     }
 
     /// Define a new item.
@@ -767,8 +747,8 @@ If you encounter an error missing from this list, please file an issue or a PR!"
     }
 
     /// Ensure that every item (other than the root module) is in a module's
-    /// children list. This is to make sure that every whitelisted item get's
-    /// codegen'd, even if its parent is not whitelisted. See issue #769 for
+    /// children list. This is to make sure that every allowlisted item get's
+    /// codegen'd, even if its parent is not allowlisted. See issue #769 for
     /// details.
     fn add_item_to_module(&mut self, item: &Item) {
         assert!(item.id() != self.root_module);
@@ -856,14 +836,16 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             match name {
                 "abstract" | "alignof" | "as" | "async" | "become" |
                 "box" | "break" | "const" | "continue" | "crate" | "do" |
-                "else" | "enum" | "extern" | "false" | "final" | "fn" |
-                "for" | "if" | "impl" | "in" | "let" | "loop" | "macro" |
-                "match" | "mod" | "move" | "mut" | "offsetof" |
+                "dyn" | "else" | "enum" | "extern" | "false" | "final" |
+                "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" |
+                "macro" | "match" | "mod" | "move" | "mut" | "offsetof" |
                 "override" | "priv" | "proc" | "pub" | "pure" | "ref" |
                 "return" | "Self" | "self" | "sizeof" | "static" |
                 "struct" | "super" | "trait" | "true" | "type" | "typeof" |
                 "unsafe" | "unsized" | "use" | "virtual" | "where" |
-                "while" | "yield" | "bool" | "_" => true,
+                "while" | "yield" | "str" | "bool" | "f32" | "f64" |
+                "usize" | "isize" | "u128" | "i128" | "u64" | "i64" |
+                "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "_" => true,
                 _ => false,
             }
         {
@@ -999,12 +981,11 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             mem::replace(&mut self.need_bitfield_allocation, vec![]);
         for id in need_bitfield_allocation {
             self.with_loaned_item(id, |ctx, item| {
-                item.kind_mut()
-                    .as_type_mut()
+                let ty = item.kind_mut().as_type_mut().unwrap();
+                let layout = ty.layout(ctx);
+                ty.as_comp_mut()
                     .unwrap()
-                    .as_comp_mut()
-                    .unwrap()
-                    .compute_bitfield_units(ctx);
+                    .compute_bitfield_units(ctx, layout.as_ref());
             });
         }
     }
@@ -1071,7 +1052,7 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                 _ => continue,
             }
 
-            let path = item.path_for_whitelisting(self);
+            let path = item.path_for_allowlisting(self);
             let replacement = self.replacements.get(&path[1..]);
 
             if let Some(replacement) = replacement {
@@ -1181,10 +1162,10 @@ If you encounter an error missing from this list, please file an issue or a PR!"
 
         self.assert_no_dangling_references();
 
-        // Compute the whitelisted set after processing replacements and
+        // Compute the allowlisted set after processing replacements and
         // resolving type refs, as those are the final mutations of the IR
         // graph, and their completion means that the IR graph is now frozen.
-        self.compute_whitelisted_and_codegen_items();
+        self.compute_allowlisted_and_codegen_items();
 
         // Make sure to do this after processing replacements, since that messes
         // with the parentage and module children, and we want to assert that it
@@ -1340,14 +1321,14 @@ If you encounter an error missing from this list, please file an issue or a PR!"
 
     fn find_used_template_parameters(&mut self) {
         let _t = self.timer("find_used_template_parameters");
-        if self.options.whitelist_recursively {
+        if self.options.allowlist_recursively {
             let used_params = analyze::<UsedTemplateParameters>(self);
             self.used_template_parameters = Some(used_params);
         } else {
-            // If you aren't recursively whitelisting, then we can't really make
+            // If you aren't recursively allowlisting, then we can't really make
             // any sense of template parameter usage, and you're on your own.
             let mut used_params = HashMap::default();
-            for &id in self.whitelisted_items() {
+            for &id in self.allowlisted_items() {
                 used_params.entry(id).or_insert(
                     id.self_template_params(self)
                         .into_iter()
@@ -1366,9 +1347,9 @@ If you encounter an error missing from this list, please file an issue or a PR!"
     /// template usage information is only computed as we enter the codegen
     /// phase.
     ///
-    /// If the item is blacklisted, then we say that it always uses the template
+    /// If the item is blocklisted, then we say that it always uses the template
     /// parameter. This is a little subtle. The template parameter usage
-    /// analysis only considers whitelisted items, and if any blacklisted item
+    /// analysis only considers allowlisted items, and if any blocklisted item
     /// shows up in the generated bindings, it is the user's responsibility to
     /// manually provide a definition for them. To give them the most
     /// flexibility when doing that, we assume that they use every template
@@ -1383,7 +1364,7 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             "We only compute template parameter usage as we enter codegen"
         );
 
-        if self.resolve_item(item).is_blacklisted(self) {
+        if self.resolve_item(item).is_blocklisted(self) {
             return true;
         }
 
@@ -1850,8 +1831,8 @@ If you encounter an error missing from this list, please file an issue or a PR!"
     ) -> Option<TypeId> {
         use clang_sys::{CXCursor_TypeAliasTemplateDecl, CXCursor_TypeRef};
         debug!(
-            "builtin_or_resolved_ty: {:?}, {:?}, {:?}",
-            ty, location, parent_id
+            "builtin_or_resolved_ty: {:?}, {:?}, {:?}, {:?}",
+            ty, location, with_id, parent_id
         );
 
         if let Some(decl) = ty.canonical_declaration(location.as_ref()) {
@@ -2166,10 +2147,27 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                     }
                     break;
                 }
-                _ => {
+                spelling if !found_namespace_keyword => {
+                    // This is _likely_, but not certainly, a macro that's been placed just before
+                    // the namespace keyword. Unfortunately, clang tokens don't let us easily see
+                    // through the ifdef tokens, so we don't know what this token should really be.
+                    // Instead of panicking though, we warn the user that we assumed the token was
+                    // blank, and then move on.
+                    //
+                    // See also https://github.com/rust-lang/rust-bindgen/issues/1676.
+                    warn!(
+                        "Ignored unknown namespace prefix '{}' at {:?} in {:?}",
+                        String::from_utf8_lossy(spelling),
+                        token,
+                        cursor
+                    );
+                }
+                spelling => {
                     panic!(
-                        "Unknown token while processing namespace: {:?}",
-                        token
+                        "Unknown token '{}' while processing namespace at {:?} in {:?}",
+                        String::from_utf8_lossy(spelling),
+                        token,
+                        cursor
                     );
                 }
             }
@@ -2224,15 +2222,46 @@ If you encounter an error missing from this list, please file an issue or a PR!"
         self.current_module = previous_id;
     }
 
-    /// Iterate over all (explicitly or transitively) whitelisted items.
+    /// Iterate over all (explicitly or transitively) allowlisted items.
     ///
-    /// If no items are explicitly whitelisted, then all items are considered
-    /// whitelisted.
-    pub fn whitelisted_items(&self) -> &ItemSet {
+    /// If no items are explicitly allowlisted, then all items are considered
+    /// allowlisted.
+    pub fn allowlisted_items(&self) -> &ItemSet {
         assert!(self.in_codegen_phase());
         assert!(self.current_module == self.root_module);
 
-        self.whitelisted.as_ref().unwrap()
+        self.allowlisted.as_ref().unwrap()
+    }
+
+    /// Check whether a particular blocklisted type implements a trait or not.
+    /// Results may be cached.
+    pub fn blocklisted_type_implements_trait(
+        &self,
+        item: &Item,
+        derive_trait: DeriveTrait,
+    ) -> CanDerive {
+        assert!(self.in_codegen_phase());
+        assert!(self.current_module == self.root_module);
+
+        let cb = match self.options.parse_callbacks {
+            Some(ref cb) => cb,
+            None => return CanDerive::No,
+        };
+
+        *self
+            .blocklisted_types_implement_traits
+            .borrow_mut()
+            .entry(derive_trait)
+            .or_default()
+            .entry(item.id())
+            .or_insert_with(|| {
+                item.expect_type()
+                    .name()
+                    .and_then(|name| {
+                        cb.blocklisted_type_implements_trait(name, derive_trait)
+                    })
+                    .unwrap_or(CanDerive::No)
+            })
     }
 
     /// Get a reference to the set of items we should generate.
@@ -2242,12 +2271,12 @@ If you encounter an error missing from this list, please file an issue or a PR!"
         self.codegen_items.as_ref().unwrap()
     }
 
-    /// Compute the whitelisted items set and populate `self.whitelisted`.
-    fn compute_whitelisted_and_codegen_items(&mut self) {
+    /// Compute the allowlisted items set and populate `self.allowlisted`.
+    fn compute_allowlisted_and_codegen_items(&mut self) {
         assert!(self.in_codegen_phase());
         assert!(self.current_module == self.root_module);
-        assert!(self.whitelisted.is_none());
-        let _t = self.timer("compute_whitelisted_and_codegen_items");
+        assert!(self.allowlisted.is_none());
+        let _t = self.timer("compute_allowlisted_and_codegen_items");
 
         let roots = {
             let mut roots = self
@@ -2255,11 +2284,11 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                 // Only consider roots that are enabled for codegen.
                 .filter(|&(_, item)| item.is_enabled_for_codegen(self))
                 .filter(|&(_, item)| {
-                    // If nothing is explicitly whitelisted, then everything is fair
+                    // If nothing is explicitly allowlisted, then everything is fair
                     // game.
-                    if self.options().whitelisted_types.is_empty() &&
-                        self.options().whitelisted_functions.is_empty() &&
-                        self.options().whitelisted_vars.is_empty()
+                    if self.options().allowlisted_types.is_empty() &&
+                        self.options().allowlisted_functions.is_empty() &&
+                        self.options().allowlisted_vars.is_empty()
                     {
                         return true;
                     }
@@ -2270,25 +2299,25 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                         return true;
                     }
 
-                    let name = item.path_for_whitelisting(self)[1..].join("::");
-                    debug!("whitelisted_items: testing {:?}", name);
+                    let name = item.path_for_allowlisting(self)[1..].join("::");
+                    debug!("allowlisted_items: testing {:?}", name);
                     match *item.kind() {
                         ItemKind::Module(..) => true,
                         ItemKind::Function(_) => {
-                            self.options().whitelisted_functions.matches(&name)
+                            self.options().allowlisted_functions.matches(&name)
                         }
                         ItemKind::Var(_) => {
-                            self.options().whitelisted_vars.matches(&name)
+                            self.options().allowlisted_vars.matches(&name)
                         }
                         ItemKind::Type(ref ty) => {
-                            if self.options().whitelisted_types.matches(&name) {
+                            if self.options().allowlisted_types.matches(&name) {
                                 return true;
                             }
 
-                            // Auto-whitelist types that don't need code
-                            // generation if not whitelisting recursively, to
+                            // Auto-allowlist types that don't need code
+                            // generation if not allowlisting recursively, to
                             // make the #[derive] analysis not be lame.
-                            if !self.options().whitelist_recursively {
+                            if !self.options().allowlist_recursively {
                                 match *ty.kind() {
                                     TypeKind::Void |
                                     TypeKind::NullPtr |
@@ -2308,7 +2337,7 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                             }
 
                             // Unnamed top-level enums are special and we
-                            // whitelist them via the `whitelisted_vars` filter,
+                            // allowlist them via the `allowlisted_vars` filter,
                             // since they're effectively top-level constants,
                             // and there's no way for them to be referenced
                             // consistently.
@@ -2327,12 +2356,14 @@ If you encounter an error missing from this list, please file an issue or a PR!"
                             }
 
                             let mut prefix_path =
-                                parent.path_for_whitelisting(self).clone();
+                                parent.path_for_allowlisting(self).clone();
                             enum_.variants().iter().any(|variant| {
-                                prefix_path.push(variant.name().into());
+                                prefix_path.push(
+                                    variant.name_for_allowlisting().into(),
+                                );
                                 let name = prefix_path[1..].join("::");
                                 prefix_path.pop().unwrap();
-                                self.options().whitelisted_vars.matches(&name)
+                                self.options().allowlisted_vars.matches(&name)
                             })
                         }
                     }
@@ -2347,48 +2378,48 @@ If you encounter an error missing from this list, please file an issue or a PR!"
             roots
         };
 
-        let whitelisted_items_predicate =
-            if self.options().whitelist_recursively {
+        let allowlisted_items_predicate =
+            if self.options().allowlist_recursively {
                 traversal::all_edges
             } else {
-                // Only follow InnerType edges from the whitelisted roots.
+                // Only follow InnerType edges from the allowlisted roots.
                 // Such inner types (e.g. anonymous structs/unions) are
-                // always emitted by codegen, and they need to be whitelisted
+                // always emitted by codegen, and they need to be allowlisted
                 // to make sure they are processed by e.g. the derive analysis.
                 traversal::only_inner_type_edges
             };
 
-        let whitelisted = WhitelistedItemsTraversal::new(
+        let allowlisted = AllowlistedItemsTraversal::new(
             self,
             roots.clone(),
-            whitelisted_items_predicate,
+            allowlisted_items_predicate,
         )
         .collect::<ItemSet>();
 
-        let codegen_items = if self.options().whitelist_recursively {
-            WhitelistedItemsTraversal::new(
+        let codegen_items = if self.options().allowlist_recursively {
+            AllowlistedItemsTraversal::new(
                 self,
                 roots.clone(),
                 traversal::codegen_edges,
             )
             .collect::<ItemSet>()
         } else {
-            whitelisted.clone()
+            allowlisted.clone()
         };
 
-        self.whitelisted = Some(whitelisted);
+        self.allowlisted = Some(allowlisted);
         self.codegen_items = Some(codegen_items);
 
-        for item in self.options().whitelisted_functions.unmatched_items() {
-            error!("unused option: --whitelist-function {}", item);
+        for item in self.options().allowlisted_functions.unmatched_items() {
+            warn!("unused option: --allowlist-function {}", item);
         }
 
-        for item in self.options().whitelisted_vars.unmatched_items() {
-            error!("unused option: --whitelist-var {}", item);
+        for item in self.options().allowlisted_vars.unmatched_items() {
+            warn!("unused option: --allowlist-var {}", item);
         }
 
-        for item in self.options().whitelisted_types.unmatched_items() {
-            error!("unused option: --whitelist-type {}", item);
+        for item in self.options().allowlisted_types.unmatched_items() {
+            warn!("unused option: --allowlist-type {}", item);
         }
     }
 
@@ -2605,19 +2636,31 @@ If you encounter an error missing from this list, please file an issue or a PR!"
 
     /// Check if `--no-partialeq` flag is enabled for this item.
     pub fn no_partialeq_by_name(&self, item: &Item) -> bool {
-        let name = item.path_for_whitelisting(self)[1..].join("::");
+        let name = item.path_for_allowlisting(self)[1..].join("::");
         self.options().no_partialeq_types.matches(&name)
     }
 
     /// Check if `--no-copy` flag is enabled for this item.
     pub fn no_copy_by_name(&self, item: &Item) -> bool {
-        let name = item.path_for_whitelisting(self)[1..].join("::");
+        let name = item.path_for_allowlisting(self)[1..].join("::");
         self.options().no_copy_types.matches(&name)
+    }
+
+    /// Check if `--no-debug` flag is enabled for this item.
+    pub fn no_debug_by_name(&self, item: &Item) -> bool {
+        let name = item.path_for_allowlisting(self)[1..].join("::");
+        self.options().no_debug_types.matches(&name)
+    }
+
+    /// Check if `--no-default` flag is enabled for this item.
+    pub fn no_default_by_name(&self, item: &Item) -> bool {
+        let name = item.path_for_allowlisting(self)[1..].join("::");
+        self.options().no_default_types.matches(&name)
     }
 
     /// Check if `--no-hash` flag is enabled for this item.
     pub fn no_hash_by_name(&self, item: &Item) -> bool {
-        let name = item.path_for_whitelisting(self)[1..].join("::");
+        let name = item.path_for_allowlisting(self)[1..].join("::");
         self.options().no_hash_types.matches(&name)
     }
 }

@@ -1,3 +1,5 @@
+#include "stub.h" // this bad path is made valid by a `-I include` clang arg
+
 #pragma once
 
 #define TESTMACRO
@@ -5,8 +7,20 @@
 #define TESTMACRO_INTEGER 42
 #define TESTMACRO_STRING "Hello Preprocessor!"
 #define TESTMACRO_STRING_EXPANDED TESTMACRO_STRING
+#define TESTMACRO_CUSTOMINTKIND_PATH 123
 
-#include <cwchar>
+// The following two macros are parsed the same by cexpr, but are semantically
+// different.
+#define TESTMACRO_NONFUNCTIONAL (TESTMACRO_INTEGER)
+#define TESTMACRO_FUNCTIONAL_EMPTY(TESTMACRO_INTEGER)
+#define TESTMACRO_FUNCTIONAL_NONEMPTY(TESTMACRO_INTEGER)-TESTMACRO_INTEGER
+#define TESTMACRO_FUNCTIONAL_TOKENIZED(  a, b   ,c,d,e   ) a/b c    d ## e
+#define TESTMACRO_FUNCTIONAL_SPLIT(  a, \
+        b) b,\
+        a
+//#define TESTMACRO_INVALID("string") // A conforming preprocessor rejects this
+#define TESTMACRO_STRING_EXPR ("string")
+#define TESTMACRO_STRING_FUNC_NON_UTF8(x) (x "ÿÿ") /* invalid UTF-8 on purpose */
 
 enum {
   MY_ANNOYING_MACRO =
@@ -196,4 +210,27 @@ struct my_prefixed_foo {
    my_prefixed_bar member;
 };
 
+enum my_prefixed_enum_to_be_constified {
+  ONE = 1,
+  TWO,
+  THREE,
+};
+
+struct my_prefixed_baz {
+  char foo[30];
+};
+
+template<typename T>
+struct my_prefixed_templated_foo {
+  T member;
+};
+
+my_prefixed_templated_foo<my_prefixed_baz> TEMPLATED_CONST_VALUE;
+
 void my_prefixed_function_to_remove();
+
+typedef union {
+  double v[4];
+} Coord;
+
+Coord coord(double x, double y, double z, double t);
